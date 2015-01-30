@@ -56,7 +56,7 @@ cms_output_created(struct cms_static *cms, struct weston_output *o)
 	if (weston_config_section_get_string(s, "icc_profile", &profile, NULL) < 0)
 		return;
 	p = weston_cms_load_profile(profile);
-	if (p == NULL) {
+	if (p == NULL && strcmp(profile, "identity")) {
 		weston_log("cms-static: failed to load %s\n", profile);
 	} else {
 		weston_log("cms-static: loading %s for %s\n",
