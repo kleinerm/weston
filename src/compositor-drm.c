@@ -989,6 +989,7 @@ drm_output_prepare_overlay_view(struct drm_output *output,
 	}
 
 	drm_fb_set_buffer(s->next, ev->surface->buffer_ref.buffer);
+	s->output = output;
 
 	box = pixman_region32_extents(&ev->transform.boundingbox);
 	s->plane.x = box->x1;
@@ -1151,6 +1152,34 @@ drm_output_set_cursor(struct drm_output *output)
 }
 
 static void
+drm_unassign_planes(struct weston_output *output_base)
+{
+	struct drm_compositor *c =
+	(struct drm_compositor *)output_base->compositor;
+	struct drm_output *output = (struct drm_output *)output_base;
+	struct drm_sprite *s;
+
+	/* Reset cursor plane assignment */
+	output->cursor_view = NULL;
+
+	/* Reset primary scanout assignment */
+	if (output->next) {
+		drm_output_release_fb(output, output->next);
+		output->next = NULL;
+	}
+
+	/* Reset all sprite assignments */
+	wl_list_for_each(s, &c->sprite_list, link) {
+		if (!s->next || s->output != output ||
+		    !drm_sprite_crtc_supported(output, s->possible_crtcs))
+			continue;
+
+		drm_output_release_fb(output, s->next);
+		s->next = NULL;
+	}
+}
+
+static int
 drm_assign_planes(struct weston_output *output_base)
 {
 	struct drm_compositor *c =
@@ -1159,6 +1188,10 @@ drm_assign_planes(struct weston_output *output_base)
 	struct weston_view *ev, *next;
 	pixman_region32_t overlap, surface_overlap;
 	struct weston_plane *primary, *next_plane;
+	int no_composition = 0;
+
+	/* Reset old planes assignment, if any. */
+	drm_unassign_planes(output_base);
 
 	/*
 	 * Find a surface for each sprite in the output using some heuristics:
@@ -1206,8 +1239,10 @@ drm_assign_planes(struct weston_output *output_base)
 			next_plane = drm_output_prepare_cursor_view(output, ev);
 		if (next_plane == NULL)
 			next_plane = drm_output_prepare_scanout_view(output, ev);
-		if (next_plane == NULL)
+		if (next_plane == NULL) {
 			next_plane = drm_output_prepare_overlay_view(output, ev);
+			no_composition += next_plane ? 1 : 0;
+		}
 		if (next_plane == NULL)
 			next_plane = primary;
 
@@ -1230,7 +1265,20 @@ drm_assign_planes(struct weston_output *output_base)
 
 		pixman_region32_fini(&surface_overlap);
 	}
+
 	pixman_region32_fini(&overlap);
+
+	/* Can we do without any composition, allowing for a fast repaint? */
+	weston_log("Overlays assigned %d times. Primary scanout assigned %d.\n",
+		   no_composition, output->next ? 1 : 0);
+
+	/* 0 = Must do composition / rendering. 1 = No need for composition,
+	 * can update via fast zerocopy updates. 2 = Fullscreen surface only,
+	 * can update via fast page flip, allows fullscreen optimization.
+	 */
+	no_composition = output->next ? (no_composition ? 1 : 2) : 0;
+
+	return no_composition;
 }
 
 static void

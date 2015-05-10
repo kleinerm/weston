@@ -67,6 +67,7 @@
 #include "version.h"
 
 #define DEFAULT_REPAINT_WINDOW 7 /* milliseconds */
+#define DEFAULT_LATE_REPAINT_WINDOW 3 /* milliseconds */
 
 #define NSEC_PER_SEC 1000000000
 
@@ -79,6 +80,18 @@ timespec_sub(struct timespec *r,
 	if (r->tv_nsec < 0) {
 		r->tv_sec--;
 		r->tv_nsec += NSEC_PER_SEC;
+	}
+}
+
+static void
+timespec_add(struct timespec *r,
+	     const struct timespec *a, const struct timespec *b)
+{
+	r->tv_sec = a->tv_sec + b->tv_sec;
+	r->tv_nsec = a->tv_nsec + b->tv_nsec;
+	if (r->tv_nsec >= NSEC_PER_SEC) {
+		r->tv_sec++;
+		r->tv_nsec -= NSEC_PER_SEC;
 	}
 }
 
@@ -2270,6 +2283,32 @@ weston_output_take_feedback_list(struct weston_output *output,
 }
 
 static int
+weston_output_prepare_repaint(struct weston_output *output)
+{
+	struct weston_compositor *ec = output->compositor;
+	struct weston_view *ev;
+	int can_fast_repaint = 0;
+
+	if (output->destroying)
+		return 0;
+
+	/* Rebuild the surface list and update surface transforms up front. */
+	weston_compositor_build_view_list(ec);
+
+	if (output->assign_planes && !output->disable_planes) {
+		/* Returns if fast repaint without composition is possible. */
+		can_fast_repaint = output->assign_planes(output);
+	} else {
+		wl_list_for_each(ev, &ec->view_list, link) {
+			weston_view_move_to_plane(ev, &ec->primary_plane);
+			ev->psf_flags = 0;
+		}
+	}
+
+	return can_fast_repaint;
+}
+
+static int
 weston_output_repaint(struct weston_output *output)
 {
 	struct weston_compositor *ec = output->compositor;
@@ -2285,17 +2324,9 @@ weston_output_repaint(struct weston_output *output)
 
 	TL_POINT("core_repaint_begin", TLP_OUTPUT(output), TLP_END);
 
-	/* Rebuild the surface list and update surface transforms up front. */
-	weston_compositor_build_view_list(ec);
-
-	if (output->assign_planes && !output->disable_planes) {
-		output->assign_planes(output);
-	} else {
-		wl_list_for_each(ev, &ec->view_list, link) {
-			weston_view_move_to_plane(ev, &ec->primary_plane);
-			ev->psf_flags = 0;
-		}
-	}
+	weston_log("%s repaint for frame %lld\n",
+		   (output->repaint_needed == 2) ? "fast" : "slow",
+		   (long long int) output->msc);
 
 	wl_list_init(&frame_callback_list);
 	wl_list_for_each(ev, &ec->view_list, link) {
@@ -2376,19 +2407,80 @@ weston_output_schedule_repaint_reset(struct weston_output *output)
 				     weston_compositor_read_input, compositor);
 }
 
+static int repaint_timer_delay_for_frame(struct weston_output *output,
+					 int repaint_window)
+{
+	struct weston_compositor *compositor = output->compositor;
+	int32_t refresh_nsec;
+	struct timespec now;
+	struct timespec gone;
+	int msec;
+
+	refresh_nsec = 1000000000000LL / output->current_mode->refresh;
+	weston_compositor_read_presentation_clock(compositor, &now);
+	timespec_sub(&gone, &now, &output->finish_stamp);
+	msec = (refresh_nsec - timespec_to_nsec(&gone)) / 1000000; /* floor */
+	msec -= repaint_window;
+
+	if (msec < -1000 || msec > 1000) {
+		static bool warned;
+
+		if (!warned)
+			weston_log("Warning: computed repaint delay is "
+			"insane: %d msec\n", msec);
+		warned = true;
+
+		msec = 0;
+	}
+
+	return msec;
+}
+
 static int
 output_repaint_timer_handler(void *data)
 {
 	struct weston_output *output = data;
 	struct weston_compositor *compositor = output->compositor;
+	int32_t refresh_nsec;
+	int msec;
 
-	if (output->repaint_needed &&
-	    compositor->state != WESTON_COMPOSITOR_SLEEPING &&
-	    compositor->state != WESTON_COMPOSITOR_OFFSCREEN &&
-	    weston_output_repaint(output) == 0)
+	if (!output->repaint_needed ||
+	    compositor->state == WESTON_COMPOSITOR_SLEEPING ||
+	    compositor->state == WESTON_COMPOSITOR_OFFSCREEN) {
+		weston_output_schedule_repaint_reset(output);
+		weston_log("Repaint aborted.\n");
 		return 0;
+	}
 
-	weston_output_schedule_repaint_reset(output);
+	/* Need to recheck assignment, as views may have changed during
+	 * the scheduled timer delay since weston_output_finish_frame().
+	 */
+	output->can_fast_repaint = weston_output_prepare_repaint(output);
+
+	/* Execute repaint if still possible */
+	if (output->can_fast_repaint || output->repaint_needed == 1) {
+		if (weston_output_repaint(output) != 0) {
+			weston_output_schedule_repaint_reset(output);
+			weston_log("Repaint error.\n");
+			return 0;
+		}
+
+		weston_log("Repaint in progress.\n");
+		return 0;
+	}
+
+	/* Fast repaint requested but impossible. Reschedule
+	 * ourselves for a full repaint at the regular early
+	 * deadline in the next frame.
+	 */
+	output->repaint_needed = 1;
+	msec = repaint_timer_delay_for_frame(output, compositor->repaint_msec);
+	refresh_nsec = 1000000000000LL / output->current_mode->refresh;
+	msec += refresh_nsec / 1000000;
+	timespec_add(&output->finish_stamp, &output->finish_stamp,
+		     &((struct timespec) { 0, refresh_nsec}));
+	wl_event_source_timer_update(output->repaint_timer, msec);
+	weston_log("Fast repaint impossible. Redispatch for early repaint in %d msecs.\n", msec);
 
 	return 0;
 }
@@ -2400,9 +2492,7 @@ weston_output_finish_frame(struct weston_output *output,
 {
 	struct weston_compositor *compositor = output->compositor;
 	int32_t refresh_nsec;
-	struct timespec now;
-	struct timespec gone;
-	int msec;
+	int msec, repaint_window;
 
 	TL_POINT("core_repaint_finished", TLP_OUTPUT(output),
 		 TLP_VBLANK(stamp), TLP_END);
@@ -2414,29 +2504,71 @@ weston_output_finish_frame(struct weston_output *output,
 						  presented_flags);
 
 	output->frame_time = stamp->tv_sec * 1000 + stamp->tv_nsec / 1000000;
+	output->finish_stamp = *stamp;
 
-	weston_compositor_read_presentation_clock(compositor, &now);
-	timespec_sub(&gone, &now, stamp);
-	msec = (refresh_nsec - timespec_to_nsec(&gone)) / 1000000; /* floor */
-	msec -= compositor->repaint_msec;
-
-	if (msec < -1000 || msec > 1000) {
-		static bool warned;
-
-		if (!warned)
-			weston_log("Warning: computed repaint delay is "
-				   "insane: %d msec\n", msec);
-		warned = true;
-
-		msec = 0;
+	/* Repaint needed for this frame? */
+	if (!output->repaint_needed ||
+	    compositor->state == WESTON_COMPOSITOR_SLEEPING ||
+	    compositor->state == WESTON_COMPOSITOR_OFFSCREEN) {
+		/* No repaint needed yet for this output, so just
+		 * exit the repaint loop to allow for a fast restart
+		 * once a surface update requires an output repaint.
+		 */
+		weston_output_schedule_repaint_reset(output);
+		weston_log("No repaint required yet, exit repaint loop.\n");
+		return;
 	}
 
-	/* Called from restart_repaint_loop and restart happens already after
-	 * the deadline given by repaint_msec? In that case we delay until
-	 * the deadline of the next frame, to give clients a more predictable
-	 * timing of the repaint cycle to lock on. */
-	if (presented_flags == PRESENTATION_FEEDBACK_INVALID && msec < 0)
+	/* Output repaint needed for this frame. Find out if the output can
+	 * be fast repainted, because no composition/rendering is required
+	 * and the updates can be done quickly via page flip or overlay
+	 * plane updates, assigning some direct scanout capable buffers.
+	 */
+	output->can_fast_repaint = weston_output_prepare_repaint(output);
+
+	/* Assign repaint window deadline depending if we need to do
+	 * slow rendering, or can update quickly without rendering.
+	 */
+	switch (output->can_fast_repaint) {
+		case 0:
+			/* Slow rendering needed. Use early repaint deadline. */
+			repaint_window = compositor->repaint_msec;
+			output->repaint_needed = 1;
+			weston_log("Repaint at early deadline %d msecs.\n",
+				   repaint_window);
+			break;
+		case 1:
+		case 2:
+			/* Fast repaint possible. Use late repaint deadline. */
+			repaint_window = compositor->late_repaint_msec;
+			output->repaint_needed = 2;
+			weston_log("Repaint at late deadline %d msecs.\n",
+				   repaint_window);
+			break;
+		default:
+			repaint_window = 0;
+			weston_log("Invalid can_fast_repaint value!\n");
+	}
+
+	/* Compute msec delay to repaint deadline for this frame. */
+	msec = repaint_timer_delay_for_frame(output, repaint_window);
+
+	/* Already after the deadline given by repaint_window? In that case we
+	 * delay until the deadline for the next frame to give clients a more
+	 * predictable timing of the repaint cycle to lock on.
+	 */
+	if (msec < 0) {
+		/* Too late. Repaint at next refresh cycles early deadline. */
+		weston_log("Missed composition deadline: %d msecs.\n", msec);
+
+		msec = repaint_timer_delay_for_frame(output,
+						     compositor->repaint_msec);
 		msec += refresh_nsec / 1000000;
+		timespec_add(&output->finish_stamp, &output->finish_stamp,
+			     &((struct timespec) { 0, refresh_nsec}));
+		output->repaint_needed = 1;
+		weston_log("Redispatch for early repaint in %d msecs.\n", msec);
+	}
 
 	if (msec < 1)
 		output_repaint_timer_handler(output);
@@ -2515,7 +2647,10 @@ weston_output_schedule_repaint(struct weston_output *output)
 		TL_POINT("core_repaint_req", TLP_OUTPUT(output), TLP_END);
 
 	loop = wl_display_get_event_loop(compositor->wl_display);
-	output->repaint_needed = 1;
+
+	if (!output->repaint_needed)
+		output->repaint_needed = 1;
+
 	if (output->repaint_scheduled)
 		return;
 
@@ -4615,6 +4750,18 @@ weston_compositor_init(struct weston_compositor *ec,
 	}
 	weston_log("Output repaint window is %d ms maximum.\n",
 		   ec->repaint_msec);
+
+	weston_config_section_get_int(s, "late-repaint-window",
+				      &ec->late_repaint_msec,
+				      DEFAULT_LATE_REPAINT_WINDOW);
+	if (ec->late_repaint_msec < 0 ||
+	    ec->late_repaint_msec >= ec->repaint_msec) {
+		weston_log("Invalid late-repaint-window value in config: %d\n",
+			   ec->late_repaint_msec);
+		ec->late_repaint_msec = DEFAULT_LATE_REPAINT_WINDOW;
+	}
+	weston_log("Output late repaint window is %d ms minimum.\n",
+		   ec->late_repaint_msec);
 
 	weston_compositor_schedule_repaint(ec);
 

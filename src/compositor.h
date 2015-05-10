@@ -193,6 +193,7 @@ struct weston_output {
 	int repaint_needed;
 	int repaint_scheduled;
 	struct wl_event_source *repaint_timer;
+	int can_fast_repaint;
 	struct weston_output_zoom zoom;
 	int dirty;
 	struct wl_signal frame_signal;
@@ -200,6 +201,7 @@ struct weston_output {
 	int move_x, move_y;
 	uint32_t frame_time; /* presentation timestamp in milliseconds */
 	uint64_t msc;        /* media stream counter */
+	struct timespec finish_stamp;
 	int disable_planes;
 	int destroying;
 	struct wl_list feedback_list;
@@ -220,7 +222,7 @@ struct weston_output {
 	int (*repaint)(struct weston_output *output,
 			pixman_region32_t *damage);
 	void (*destroy)(struct weston_output *output);
-	void (*assign_planes)(struct weston_output *output);
+	int (*assign_planes)(struct weston_output *output);
 	int (*switch_mode)(struct weston_output *output, struct weston_mode *mode);
 
 	/* backlight values are on 0-255 range, where higher is brighter */
@@ -683,6 +685,7 @@ struct weston_compositor {
 
 	clockid_t presentation_clock;
 	int32_t repaint_msec;
+	int32_t late_repaint_msec;
 
 	int exit_code;
 };
