@@ -680,7 +680,7 @@ drm_output_repaint(struct weston_output *output_base,
 		uint32_t flags = 0, fb_id = 0;
 		drmVBlank vbl = {
 			.request.type = DRM_VBLANK_RELATIVE | DRM_VBLANK_EVENT,
-			.request.sequence = 1,
+			.request.sequence = 0,
 		};
 
 		if ((!s->current && !s->next) ||
