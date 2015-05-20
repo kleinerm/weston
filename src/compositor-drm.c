@@ -1242,6 +1242,10 @@ drm_assign_planes(struct weston_output *output_base)
 		if (next_plane == NULL) {
 			next_plane = drm_output_prepare_overlay_view(output, ev);
 			no_composition += next_plane ? 1 : 0;
+			if (next_plane)
+				pixman_region32_union(&output_base->overlay_region,
+						      &output_base->overlay_region,
+						      &ev->transform.boundingbox);
 		}
 		if (next_plane == NULL)
 			next_plane = primary;

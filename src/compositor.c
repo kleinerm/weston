@@ -2295,6 +2295,11 @@ weston_output_prepare_repaint(struct weston_output *output)
 	/* Rebuild the surface list and update surface transforms up front. */
 	weston_compositor_build_view_list(ec);
 
+	/* overlay_region contains all regions covered by hardware overlays
+	 * on this output, according to assign_planes.
+	 */
+	pixman_region32_init(&output->overlay_region);
+
 	if (output->assign_planes && !output->disable_planes) {
 		/* Returns if fast repaint without composition is possible. */
 		can_fast_repaint = output->assign_planes(output);
@@ -2304,6 +2309,35 @@ weston_output_prepare_repaint(struct weston_output *output)
 			ev->psf_flags = 0;
 		}
 	}
+
+	/* Determine damage for this outputs composition surface. */
+	compositor_accumulate_damage(ec);
+
+	pixman_region32_init(&output->output_damage);
+	pixman_region32_intersect(&output->output_damage,
+				  &ec->primary_plane.damage, &output->region);
+	pixman_region32_subtract(&output->output_damage,
+				 &output->output_damage, &ec->primary_plane.clip);
+
+	/* Remove damage from output where the composition surface is occluded
+	 * by the opaque hardware overlay planes. We don't need to repair
+	 * damage which would be invisible during the next output repaint
+	 * anyway.
+	 */
+	pixman_region32_subtract(&output->output_damage,
+				 &output->output_damage, &output->overlay_region);
+
+	/* If the outputs composition surface is visible, but all the damaged
+	 * regions are occluded by opaque hardware overlays, then we don't need
+	 * to repair damage by costly rendering. Therefore allow a fast repaint
+	 * in this case.
+	 */
+	if (!can_fast_repaint &&
+	    pixman_region32_not_empty(&output->overlay_region) &&
+	    !pixman_region32_not_empty(&output->output_damage))
+		can_fast_repaint = 1;
+
+	pixman_region32_fini(&output->overlay_region);
 
 	return can_fast_repaint;
 }
@@ -2316,7 +2350,6 @@ weston_output_repaint(struct weston_output *output)
 	struct weston_animation *animation, *next;
 	struct weston_frame_callback *cb, *cnext;
 	struct wl_list frame_callback_list;
-	pixman_region32_t output_damage;
 	int r;
 
 	if (output->destroying)
@@ -2342,20 +2375,12 @@ weston_output_repaint(struct weston_output *output)
 		}
 	}
 
-	compositor_accumulate_damage(ec);
-
-	pixman_region32_init(&output_damage);
-	pixman_region32_intersect(&output_damage,
-				  &ec->primary_plane.damage, &output->region);
-	pixman_region32_subtract(&output_damage,
-				 &output_damage, &ec->primary_plane.clip);
-
 	if (output->dirty)
 		weston_output_update_matrix(output);
 
-	r = output->repaint(output, &output_damage);
+	r = output->repaint(output, &output->output_damage);
 
-	pixman_region32_fini(&output_damage);
+	pixman_region32_fini(&output->output_damage);
 
 	output->repaint_needed = 0;
 

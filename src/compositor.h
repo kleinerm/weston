@@ -189,6 +189,8 @@ struct weston_output {
 	/** Output area in global coordinates, simple rect */
 	pixman_region32_t region;
 
+	pixman_region32_t overlay_region; /* Region covered by overlays */
+	pixman_region32_t output_damage; /* Current damage for next repaint */
 	pixman_region32_t previous_damage;
 	int repaint_needed;
 	int repaint_scheduled;
