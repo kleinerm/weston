@@ -636,8 +636,15 @@ drm_output_repaint(struct weston_output *output_base,
 	if (output->destroy_pending)
 		return -1;
 
-	if (!output->next)
-		drm_output_render(output, damage);
+	if (!output->next) {
+		if (pixman_region32_not_empty(damage) ||
+		    !output->current || output->current->is_client_buffer) {
+			drm_output_render(output, damage);
+		}
+		else {
+			output->next = output->current;
+		}
+	}
 	if (!output->next)
 		return -1;
 
@@ -810,7 +817,8 @@ page_flip_handler(int fd, unsigned int frame,
 	 * we just want to page flip to the current buffer to get an accurate
 	 * timestamp */
 	if (output->page_flip_pending) {
-		drm_output_release_fb(output, output->current);
+		if (output->current != output->next)
+			drm_output_release_fb(output, output->current);
 		output->current = output->next;
 		output->next = NULL;
 	}
@@ -1302,7 +1310,8 @@ drm_output_switch_mode(struct weston_output *output_base, struct weston_mode *mo
 
 	/* reset rendering stuff. */
 	drm_output_release_fb(output, output->current);
-	drm_output_release_fb(output, output->next);
+	if (output->next != output->current)
+		drm_output_release_fb(output, output->next);
 	output->current = output->next = NULL;
 
 	if (ec->use_pixman) {
