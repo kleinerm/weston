@@ -1515,7 +1515,7 @@ drm_output_check_scanout_format(struct drm_output *output,
 
 	format = gbm_bo_get_format(bo);
 
-	if (format == GBM_FORMAT_ARGB8888) {
+	if (format == GBM_FORMAT_ARGB8888 || format == GBM_FORMAT_ARGB2101010) {
 		/* We can scanout an ARGB buffer if the surface's
 		 * opaque region covers the whole output, but we have
 		 * to use XRGB as the KMS format code. */
@@ -1525,7 +1525,8 @@ drm_output_check_scanout_format(struct drm_output *output,
 		pixman_region32_subtract(&r, &r, &es->opaque);
 
 		if (!pixman_region32_not_empty(&r))
-			format = GBM_FORMAT_XRGB8888;
+			format = (format == GBM_FORMAT_ARGB8888) ?
+				  GBM_FORMAT_XRGB8888 : GBM_FORMAT_XRGB2101010;
 
 		pixman_region32_fini(&r);
 	}
@@ -1580,7 +1581,6 @@ drm_output_prepare_scanout_view(struct drm_output_state *output_state,
 		return NULL;
 	if (!drm_view_transform_supported(ev))
 		return NULL;
-
 	if (ev->alpha != 1.0f)
 		return NULL;
 
@@ -2630,7 +2630,7 @@ drm_output_check_plane_format(struct drm_plane *p,
 
 	format = gbm_bo_get_format(bo);
 
-	if (format == GBM_FORMAT_ARGB8888) {
+	if (format == GBM_FORMAT_ARGB8888 || format == GBM_FORMAT_ARGB2101010) {
 		pixman_region32_t r;
 
 		pixman_region32_init_rect(&r, 0, 0,
@@ -2639,7 +2639,8 @@ drm_output_check_plane_format(struct drm_plane *p,
 		pixman_region32_subtract(&r, &r, &ev->surface->opaque);
 
 		if (!pixman_region32_not_empty(&r))
-			format = GBM_FORMAT_XRGB8888;
+			format = (format == GBM_FORMAT_ARGB8888) ?
+				  GBM_FORMAT_XRGB8888 : GBM_FORMAT_XRGB2101010;
 
 		pixman_region32_fini(&r);
 	}
