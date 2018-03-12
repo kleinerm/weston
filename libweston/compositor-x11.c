@@ -720,6 +720,12 @@ x11_output_init_shm(struct x11_backend *b, struct x11_output *output,
 		output->depth, bitsperpixel);
 
 	if (bitsperpixel == 32 &&
+	    visual_type->red_mask == 0x000003ff &&
+	    visual_type->green_mask == 0x000ffc00 &&
+	    visual_type->blue_mask == 0x3ff00000) {
+		weston_log("Will use x2b10g10r10 format for SHM surfaces\n");
+		pixman_format = PIXMAN_x2b10g10r10;
+	} else if (bitsperpixel == 32 &&
 	    visual_type->red_mask == 0x3ff00000 &&
 	    visual_type->green_mask == 0x000ffc00 &&
 	    visual_type->blue_mask == 0x000003ff) {
