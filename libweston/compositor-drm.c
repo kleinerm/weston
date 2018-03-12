@@ -1775,6 +1775,8 @@ fallback_format_for(uint32_t format)
 		return GBM_FORMAT_ARGB8888;
 	case GBM_FORMAT_XRGB2101010:
 		return GBM_FORMAT_ARGB2101010;
+	case GBM_FORMAT_XBGR2101010:
+		return GBM_FORMAT_ABGR2101010;
 	default:
 		return 0;
 	}
@@ -2154,6 +2156,9 @@ drm_output_init_pixman(struct drm_output *output, struct drm_backend *b)
 	unsigned int i;
 
 	switch (format) {
+		case GBM_FORMAT_XBGR2101010:
+			pixman_format = PIXMAN_x2b10g10r10;
+			break;
 		case GBM_FORMAT_XRGB2101010:
 			pixman_format = PIXMAN_x2r10g10b10;
 			break;
@@ -2444,6 +2449,8 @@ parse_gbm_format(const char *s, uint32_t default_value, uint32_t *gbm_format)
 		*gbm_format = GBM_FORMAT_RGB565;
 	else if (strcmp(s, "xrgb2101010") == 0)
 		*gbm_format = GBM_FORMAT_XRGB2101010;
+	else if (strcmp(s, "xbgr2101010") == 0)
+		*gbm_format = GBM_FORMAT_XBGR2101010;
 	else {
 		weston_log("fatal: unrecognized pixel format: %s\n", s);
 		ret = -1;
