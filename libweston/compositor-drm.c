@@ -2154,6 +2154,9 @@ drm_output_init_pixman(struct drm_output *output, struct drm_backend *b)
 	unsigned int i;
 
 	switch (format) {
+		case GBM_FORMAT_XRGB2101010:
+			pixman_format = PIXMAN_x2r10g10b10;
+			break;
 		case GBM_FORMAT_XRGB8888:
 			pixman_format = PIXMAN_x8r8g8b8;
 			break;
