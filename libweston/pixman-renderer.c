@@ -861,6 +861,34 @@ pixman_renderer_init(struct weston_compositor *ec)
 	return 0;
 }
 
+static void create_shadow(struct pixman_output_state *po, int width, int height,
+			  uint32_t format)
+{
+	void* shadow_buffer;
+	pixman_image_t *shadow_image;
+	int bpp = PIXMAN_FORMAT_BPP(format) / 8;
+
+	shadow_buffer = malloc(width * height * bpp);
+	if (!shadow_buffer)
+		return;
+
+	shadow_image = pixman_image_create_bits(format, width, height,
+						shadow_buffer, width * bpp);
+
+	if (!shadow_image) {
+		free(shadow_buffer);
+		return;
+	}
+
+	if (po->shadow_image) {
+		pixman_image_unref(po->shadow_image);
+		free(po->shadow_buffer);
+	}
+
+	po->shadow_buffer = shadow_buffer;
+	po->shadow_image = shadow_image;
+}
+
 WL_EXPORT void
 pixman_renderer_output_set_buffer(struct weston_output *output, pixman_image_t *buffer)
 {
@@ -871,8 +899,17 @@ pixman_renderer_output_set_buffer(struct weston_output *output, pixman_image_t *
 	po->hw_buffer = buffer;
 
 	if (po->hw_buffer) {
-		output->compositor->read_format = pixman_image_get_format(po->hw_buffer);
+		uint32_t format = pixman_image_get_format(po->hw_buffer);
+		output->compositor->read_format = format;
 		pixman_image_ref(po->hw_buffer);
+
+		/* Realloc shadow_image if needed, to match hw_buffer format */
+		if (pixman_image_get_format(po->shadow_image) != format) {
+			create_shadow(po,
+				      pixman_image_get_width(po->shadow_image),
+				      pixman_image_get_height(po->shadow_image),
+				      format);
+		}
 	}
 }
 
@@ -890,22 +927,10 @@ pixman_renderer_output_create(struct weston_output *output)
 	w = output->current_mode->width;
 	h = output->current_mode->height;
 
-	po->shadow_buffer = malloc(w * h * 4);
-
-	if (!po->shadow_buffer) {
-		free(po);
+	/* create initial shadow image */
+	create_shadow(po, w, h, PIXMAN_x8r8g8b8);
+	if (!po->shadow_image)
 		return -1;
-	}
-
-	po->shadow_image =
-		pixman_image_create_bits(PIXMAN_x8r8g8b8, w, h,
-					 po->shadow_buffer, w * 4);
-
-	if (!po->shadow_image) {
-		free(po->shadow_buffer);
-		free(po);
-		return -1;
-	}
 
 	output->renderer_state = po;
 
